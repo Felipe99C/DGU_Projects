@@ -9,14 +9,16 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, unquote
 from config import CONFIG
+import time
 
 
 @log_decorator
 def verificar_e_baixar_arquivos(pasta_destino: str, url_base: str) -> list:
     """
     Verifica se os arquivos XLSX da página da web existem na pasta de destino (Data).
-    Se não existirem, faz o download dos arquivos faltantes.
+    Se não existirem, faz o download dos arquivos .
     """
+    
     log.info(f"Verificando arquivos XLSX na pasta {pasta_destino}")
     
     # Criar a pasta de destino se não existir
@@ -28,64 +30,167 @@ def verificar_e_baixar_arquivos(pasta_destino: str, url_base: str) -> list:
     arquivos_existentes = set(os.listdir(pasta_destino))
     log.info(f"Encontrados {len(arquivos_existentes)} arquivos na pasta")
     
+    # Headers para simular um navegador
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/octet-stream',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive'
+    }
+    
     # Scrapping da página para encontrar links para arquivos XLSX
     try:
         log.info(f"Acessando a URL: {url_base}")
-        response = requests.get(url_base)
-        response.raise_for_status()  # Verificar se a requisição foi bem-sucedida
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Encontrar todos os links para arquivos XLSX
-        links_xlsx = []
-        for link in soup.find_all('a', href=True):
-            href = link['href']
-            if href.endswith('.xlsx') and '/download/' in href:
-                links_xlsx.append(href)
-        
-        log.info(f"Encontrados {len(links_xlsx)} arquivos XLSX na página")
-        
-        # Arquivos baixados
-        arquivos_baixados = []
-        
-        # Verificar quais arquivos precisam ser baixados
-        for link in links_xlsx:
-            # Extrair o nome do arquivo do link
-            nome_arquivo = unquote(os.path.basename(link.split('/download/file')[0]))
+        with requests.Session() as session:
+            session.headers.update(headers)
+            response = session.get(url_base, timeout=30)
+            response.raise_for_status()  # Verificar se a requisição foi bem-sucedida
             
-            # Verificar se o arquivo já existe na pasta
-            if nome_arquivo not in arquivos_existentes:
-                log.info(f"Arquivo {nome_arquivo} não encontrado localmente. Iniciando download...")
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Encontrar todos os links para arquivos XLSX
+            links_xlsx = []
+            # Procurar por links em tags <a> que contenham "bancovde" e ".xlsx"
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                # Verificar se é um link para arquivo XLSX do banco VDE
+                if 'bancovde-' in href.lower() and '.xlsx' in href.lower():
+                    links_xlsx.append(href)
+                # Verificar também os links com download/file no formato que você compartilhou
+                elif '/download/file' in href and '.xlsx' in href.lower():
+                    links_xlsx.append(href)
+            
+            log.info(f"Encontrados {len(links_xlsx)} arquivos XLSX na página")
+            for l in links_xlsx:
+                log.info(f"Link encontrado: {l}")
+            
+            # Arquivos baixados
+            arquivos_baixados = []
+            
+            # Verificar quais arquivos precisam ser baixados
+            for link in links_xlsx:
+                # Métodos diferentes dependendo do formato do link
+                if "bancovde-" in link.lower():
+                    # Formato: https://.../bancovde-2025.xlsx/... 
+                    # Extrair o nome bancovde-AAAA.xlsx
+                    import re
+                    match = re.search(r'bancovde-\d{4}\.xlsx', link.lower())
+                    if match:
+                        nome_arquivo = match.group(0)
+                    else:
+                        # Extrair nome usando o padrão final do link
+                        parts = link.split('/')
+                        nome_arquivo = next((p for p in parts if '.xlsx' in p.lower()), f"bancovde_{len(arquivos_baixados)}.xlsx")
+                else:
+                    # Último recurso: obter parte final do URL e remover parâmetros
+                    parts = link.split('/')
+                    nome_arquivo = next((p for p in reversed(parts) if p and '.xlsx' in p.lower()), f"arquivo_{len(arquivos_baixados)}.xlsx")
+                    # Limpar parâmetros da URL, se houver
+                    nome_arquivo = nome_arquivo.split('?')[0]
                 
-                # URL completa para download
-                url_download = link
+                # Verificar se usamos @@download/file no final
+                if '@@download/file' in nome_arquivo:
+                    nome_arquivo = nome_arquivo.replace('@@download/file', '')
                 
-                # Garantir que a URL está completa
-                if not url_download.startswith('http'):
-                    url_download = urljoin(url_base, url_download)
+                # Limpar o nome do arquivo de caracteres inválidos
+                import re
+                nome_arquivo = re.sub(r'[^\w\-\. ]', '_', nome_arquivo)
                 
-                try:
-                    # Baixar o arquivo
-                    arquivo_response = requests.get(url_download, stream=True)
-                    arquivo_response.raise_for_status()
+                log.info(f"Nome do arquivo extraído: {nome_arquivo}")
+                
+                # Verificar se o arquivo já existe na pasta
+                if nome_arquivo not in arquivos_existentes:
+                    log.info(f"Arquivo {nome_arquivo} não encontrado localmente. Iniciando download...")
                     
-                    # Salvar o arquivo localmente
-                    caminho_completo = os.path.join(pasta_destino, nome_arquivo)
-                    with open(caminho_completo, 'wb') as arquivo:
-                        for chunk in arquivo_response.iter_content(chunk_size=8192):
-                            arquivo.write(chunk)
+                    # URL completa para download
+                    url_download = link
                     
-                    log.info(f"Download de {nome_arquivo} concluído com sucesso")
-                    arquivos_baixados.append(nome_arquivo)
+                    # Garantir que a URL está completa
+                    if not url_download.startswith('http'):
+                        url_download = urljoin(url_base, url_download)
                     
-                except Exception as e:
-                    log.error(f"Erro ao baixar o arquivo {nome_arquivo}: {str(e)}")
-            else:
-                log.info(f"Arquivo {nome_arquivo} já existe localmente")
-        
-        log.info(f"Verificação e download concluídos. {len(arquivos_baixados)} arquivos foram baixados")
-        return arquivos_baixados
-        
+                    # Tentar baixar com várias tentativas
+                    max_tentativas = 3
+                    for tentativa in range(1, max_tentativas + 1):
+                        try:
+                            log.info(f"Tentativa {tentativa} de {max_tentativas} para baixar {nome_arquivo}")
+                            
+                            # Caminho completo para o arquivo
+                            caminho_completo = os.path.join(pasta_destino, nome_arquivo)
+                            
+                            # Baixar usando a sessão
+                            with session.get(url_download, stream=True, timeout=60) as arquivo_response:
+                                arquivo_response.raise_for_status()
+                                
+                                # Verificar se o Content-Length está presente
+                                tamanho_esperado = None
+                                if 'Content-Length' in arquivo_response.headers:
+                                    tamanho_esperado = int(arquivo_response.headers['Content-Length'])
+                                    log.info(f"Tamanho esperado do arquivo: {tamanho_esperado} bytes")
+                                
+                                # Baixar o arquivo em chunks
+                                tamanho_baixado = 0
+                                with open(caminho_completo, 'wb') as arquivo:
+                                    for chunk in arquivo_response.iter_content(chunk_size=8192):
+                                        if chunk:  # filtrar keep-alive chunks
+                                            arquivo.write(chunk)
+                                            tamanho_baixado += len(chunk)
+                            
+                            # Verificar se o tamanho baixado corresponde ao esperado
+                            if tamanho_esperado is not None and tamanho_baixado != tamanho_esperado:
+                                log.warning(f"Tamanho do arquivo baixado ({tamanho_baixado} bytes) não corresponde ao esperado ({tamanho_esperado} bytes)")
+                                # Remove o arquivo incompleto
+                                if os.path.exists(caminho_completo):
+                                    os.remove(caminho_completo)
+                                # Continua para a próxima tentativa
+                                continue
+                            
+                            # Verificar se o arquivo é um XLSX válido
+                            try:
+                                import pandas as pd
+                                # Tentar abrir o arquivo com pandas para verificar se é válido
+                                df = pd.read_excel(caminho_completo, nrows=5)
+                                if df.empty:
+                                    log.warning(f"Arquivo XLSX vazio ou inválido")
+                                    if os.path.exists(caminho_completo):
+                                        os.remove(caminho_completo)
+                                    continue
+                                
+                                log.info(f"Arquivo XLSX válido verificado")
+                                arquivos_baixados.append(nome_arquivo)
+                                # Arquivo válido, interrompe as tentativas
+                                break
+                            except Exception as e:
+                                log.warning(f"Arquivo baixado não é um XLSX válido: {str(e)}")
+                                # Remove o arquivo corrompido
+                                if os.path.exists(caminho_completo):
+                                    os.remove(caminho_completo)
+                                # Se for a última tentativa, registra o erro
+                                if tentativa == max_tentativas:
+                                    log.error(f"Falha em todas as {max_tentativas} tentativas para baixar {nome_arquivo}")
+                                else:
+                                    # Espera antes da próxima tentativa (com backoff exponencial)
+                                    tempo_espera = 2 ** tentativa
+                                    log.info(f"Aguardando {tempo_espera} segundos antes da próxima tentativa")
+                                    time.sleep(tempo_espera)
+                        
+                        except Exception as e:
+                            log.error(f"Erro na tentativa {tentativa} ao baixar {nome_arquivo}: {str(e)}")
+                            # Remove qualquer arquivo parcial
+                            if os.path.exists(caminho_completo):
+                                os.remove(caminho_completo)
+                            
+                            # Se não for a última tentativa, espera e tenta novamente
+                            if tentativa < max_tentativas:
+                                tempo_espera = 2 ** tentativa
+                                log.info(f"Aguardando {tempo_espera} segundos antes da próxima tentativa")
+                                time.sleep(tempo_espera)
+                else:
+                    log.info(f"Arquivo {nome_arquivo} já existe localmente")
+            
+            log.info(f"Verificação e download concluídos. {len(arquivos_baixados)} arquivos foram baixados")
+            return arquivos_baixados
+            
     except Exception as e:
         log.error(f"Erro ao acessar a página ou analisar o HTML: {str(e)}")
         return []
