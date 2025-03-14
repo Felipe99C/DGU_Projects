@@ -7,7 +7,7 @@ CONFIG = {
     # Configurações do banco de dados como é local mesmo foda-se
     'tipo_bd': 'postgres',
     'usuario': 'dgu',
-    'senha': '123456',  
+    'senha': '',  
     'host': 'localhost',
     'porta': '5433',
     'nome_bd': 'data_glow_up',
